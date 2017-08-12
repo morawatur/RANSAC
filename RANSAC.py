@@ -270,8 +270,3 @@ for iteration in range(n_iterations):
 
         if n_inliers_dev > n_inliers_threshold:
             display_ellipse_on_image(model_ellipse, fft1)
-
-
-
-
-
