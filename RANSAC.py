@@ -12,11 +12,11 @@ import copy
 
 # ------------------------------------------------------------
 
-n_model_points = 1
 min_tilt = 0
 max_tilt = 360
 n_iterations = 1000
 min_dist_from_model = 4        # 4 px
+n_inliers_threshold = 5000
 
 # ------------------------------------------------------------
 
@@ -146,7 +146,7 @@ def correct_model_randomly(e, a_max_len, corr_dir, opts, opt_fixed=False, opt=0)
 
 # ------------------------------------------------------------
 
-def count_inliers(data, ellipse):
+def count_inliers(data, ellipse, disp_ellipse=False):
     min_intensity = np.min(data)
     max_intensity = np.max(data)
     intensity_threshold = 1.0 * (min_intensity + max_intensity) / 2.0
@@ -164,10 +164,11 @@ def count_inliers(data, ellipse):
 
     pass_matrix1 = data > intensity_threshold
     pass_matrix2 = dists < min_dist_from_model
-    n_inl = sum(sum(pass_matrix1 * pass_matrix2))
+    pass_matrix = pass_matrix1 * pass_matrix2
+    n_inl = sum(sum(pass_matrix))
 
-    if n_inl > 5000:
-        display_ellipse_and_neighbour_pixels(ellipse, pass_matrix1 * pass_matrix2)
+    if disp_ellipse and n_inl > n_inliers_threshold:
+        display_ellipse_and_neighbour_pixels(ellipse, pass_matrix)
 
     return n_inl
 
@@ -248,7 +249,7 @@ for iteration in range(n_iterations):
                                                                  opt_fixed=True, opt=last_opt)
 
         n_inliers_curr = count_inliers(fft1, model_ellipse)
-        n_inliers_dev = count_inliers(fft1, model_ellipse_dev)
+        n_inliers_dev = count_inliers(fft1, model_ellipse_dev, True)
         print('N1 = {0}, N0 = {1}'.format(n_inliers_dev, n_inliers_curr))
 
         if n_inliers_dev <= n_inliers_curr and corr_dir > 0:
@@ -267,7 +268,7 @@ for iteration in range(n_iterations):
         if len(opts) == 0:
             all_opts_used = True
 
-        if n_inliers_dev > 5500:
+        if n_inliers_dev > n_inliers_threshold:
             display_ellipse_on_image(model_ellipse, fft1)
 
 
