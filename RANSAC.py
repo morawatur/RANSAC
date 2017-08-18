@@ -1,6 +1,7 @@
 import Constants as const
 import CudaConfig as ccfg
 import Dm3Reader3 as dm3
+import GUI as gui
 
 from numba import cuda
 import numpy as np
@@ -8,18 +9,6 @@ import math
 import random
 import matplotlib.pyplot as plt
 import copy
-
-# ------------------------------------------------------------
-
-min_tilt = 0
-max_tilt = 360
-n_iterations = 200
-min_dist_from_model = 5       # 5 px
-intensity_coeff = 1.0
-try_again_threshold = 4000
-n_inliers_threshold = 7000
-min_ab_ratio = 0.3
-max_n_tries = 20
 
 # ------------------------------------------------------------
 
@@ -41,6 +30,8 @@ class Ellipse:
         c = np.sqrt(np.abs(self.a ** 2 - self.b ** 2))
         self.F1 = [-c * np.cos(self.tau), -c * np.sin(self.tau)]
         self.F2 = [c * np.cos(self.tau), c * np.sin(self.tau)]
+        # a = max(e.a, e.b)
+        # b = min(e.a, e.b)     # tu mozna to zrobic
         self.s = 2 * max(self.a, self.b)
 
 # ------------------------------------------------------------
@@ -86,12 +77,12 @@ def create_ellipse_from_1pt_and_tilt(pt, tau):
 
 # ------------------------------------------------------------
 
-def correct_model_ellipse_axes(e, da, first=True, second=False):
+def correct_model_ellipse_axes(e, da, db, first=True, second=False):
     new_e = e.copy()
     if first:
         new_e.a = new_e.a + da
     if second:
-        new_e.b = new_e.b + da
+        new_e.b = new_e.b + db
     new_e.update()
     return new_e
 
@@ -106,11 +97,11 @@ def correct_model_ellipse_tilt(e, dtau):
 # ------------------------------------------------------------
 
 def determine_max_rand_step(n_inl, init_val=300, min_val=10):
-    if n_inl <= n_inliers_threshold:
+    if n_inl <= const.n_inliers_threshold:
         max_rand_step = init_val
-    elif n_inliers_threshold < n_inl <= 2 * n_inliers_threshold:
-        a = (min_val - init_val) / n_inliers_threshold
-        b = init_val - a * n_inliers_threshold
+    elif const.n_inliers_threshold < n_inl <= 2 * const.n_inliers_threshold:
+        a = (min_val - init_val) / const.n_inliers_threshold
+        b = init_val - a * const.n_inliers_threshold
         max_rand_step = a * n_inl + b
     else:
         max_rand_step = min_val
@@ -118,17 +109,33 @@ def determine_max_rand_step(n_inl, init_val=300, min_val=10):
 
 # ------------------------------------------------------------
 
-def correct_model_randomly(e, a_max_len, corr_dir, n_inl, opts, opt_fixed=False, opt=0):
+def correct_model_randomly(e, a_range, b_range, corr_dir, n_inl, opts, opt_fixed=False, opt=0):
     if not opt_fixed:
         opt = random.choice(opts)
 
     max_rand_step = determine_max_rand_step(n_inl, 300, 10)
     max_rand_tilt = determine_max_rand_step(n_inl, 90, 10)
-
-    step = random.randint(1, max_rand_step) * corr_dir
     tilt = random.randint(1, max_rand_tilt) * corr_dir
-    a_ok = 0 < e.a + step < a_max_len
-    b_ok = 0 < e.b + step < a_max_len
+
+    a_ok = False
+    b_ok = False
+
+    a_step = 0
+    b_step = 0
+
+    if opt in [0, 2, 3]:
+        a_step = random.randint(1, max_rand_step) * corr_dir
+        for a_sr in a_range:
+            a_ok = a_sr[0] < e.a + a_step < a_sr[1]
+            if a_ok: break
+
+    if opt in [1, 2, 3]:
+        b_step = a_step
+        for b_sr in b_range:
+            b_ok = b_sr[0] < e.b + b_step < b_sr[1]
+            if b_ok: break
+        if not b_ok:
+            b_step = random.randint(1, max_rand_step) * corr_dir
 
     # --- Method no 1 ---
     # corr_a, corr_b, corr_tau = False
@@ -144,7 +151,7 @@ def correct_model_randomly(e, a_max_len, corr_dir, n_inl, opts, opt_fixed=False,
     corr_b = True if opt in [1, 2, 3] and b_ok else False
     corr_tau = True if opt in [3, 4] else False
 
-    new_e = correct_model_ellipse_axes(e, step, corr_a, corr_b)
+    new_e = correct_model_ellipse_axes(e, a_step, b_step, corr_a, corr_b)
     if corr_tau:
         tilt_rad = deg2rad(tilt) % (2 * np.pi)
         new_e = correct_model_ellipse_tilt(new_e, tilt_rad)
@@ -213,19 +220,53 @@ def calc_dists_from_ellipse(data, ellipse):
 def count_inliers(data, ellipse, disp_ellipse=False):
     min_intensity = np.min(data)
     max_intensity = np.max(data)
-    intensity_threshold = intensity_coeff * (min_intensity + max_intensity) / 2.0
+    intensity_threshold = const.intensity_coeff * (min_intensity + max_intensity) / 2.0
 
     dists = calc_dists_from_ellipse(data, ellipse)
 
     pass_matrix1 = data > intensity_threshold
-    pass_matrix2 = dists < min_dist_from_model
+    pass_matrix2 = dists < const.min_dist_from_model
     pass_matrix = pass_matrix1 * pass_matrix2
     n_inl = sum(sum(pass_matrix))
 
-    if disp_ellipse and n_inl > n_inliers_threshold:
+    if disp_ellipse and n_inl > const.n_inliers_threshold:
         display_ellipse_and_neighbour_pixels(ellipse, pass_matrix)
 
     return n_inl
+
+# ------------------------------------------------------------
+
+def modify_range_of_axis_values(last_e, a_range, b_range):
+    dist_to_exclude = 50
+    a = last_e.a
+    b = last_e.b
+    new_a_range = []
+    new_b_range = []
+    print(a, b)
+
+    for sr_idx, a_subrange in zip(range(len(a_range)), a_range):
+        if a_subrange[0] < a < a_subrange[1]:
+            new_a_subranges = []
+            if a_subrange[0] < a - dist_to_exclude:
+                new_a_subranges.append([a_subrange[0], a - dist_to_exclude])
+            if a_subrange[1] > a + dist_to_exclude:
+                new_a_subranges.append([a + dist_to_exclude, a_subrange[1]])
+            new_a_range.extend(new_a_subranges)
+        else:
+            new_a_range.append(a_subrange)
+
+    for sr_idx, b_subrange in zip(range(len(b_range)), b_range):
+        if b_subrange[0] < b < b_subrange[1]:
+            new_b_subranges = []
+            if b_subrange[0] < b - dist_to_exclude:
+                new_b_subranges.append([b_subrange[0], b - dist_to_exclude])
+            if b_subrange[1] > b + dist_to_exclude:
+                new_b_subranges.append([b + dist_to_exclude, b_subrange[1]])
+            new_b_range.extend(new_b_subranges)
+        else:
+            new_b_range.append(b_subrange)
+
+    return new_a_range, new_b_range
 
 # ------------------------------------------------------------
 
@@ -250,9 +291,9 @@ def generate_ellipse_to_draw(e, n_points=360):
 
     a = max(e.a, e.b)
     b = min(e.a, e.b)
-    t_step = max_tilt / n_points
+    t_step = const.max_tilt / n_points
 
-    for t_idx, t in zip(range(n_points), frange(min_tilt, max_tilt, t_step)):
+    for t_idx, t in zip(range(n_points), frange(const.min_tilt, const.max_tilt, t_step)):
         x[t_idx] = a * np.cos(e.tau) * np.cos(deg2rad(t)) - b * np.sin(e.tau) * np.sin(deg2rad(t))
         y[t_idx] = a * np.sin(e.tau) * np.cos(deg2rad(t)) + b * np.cos(e.tau) * np.sin(deg2rad(t))
 
@@ -282,120 +323,140 @@ def display_ellipse_and_neighbour_pixels(e, pass_matrix):
 
 # ------------------------------------------------------------
 
-# for ang in frange(0.0, 360.0, 45.0):
-#     e = Ellipse([0, 0], 100, 200, deg2rad(ang))
-#     x, y = generate_ellipse_to_draw(e)
-#     plt.plot(x, y, 'r')
-# plt.show()
+def fit_model_to_image():
+    # for ang in frange(0.0, 360.0, 45.0):
+    #     e = Ellipse([0, 0], 100, 200, deg2rad(ang))
+    #     x, y = generate_ellipse_to_draw(e)
+    #     plt.plot(x, y, 'r')
+    # plt.show()
 
-fft1 = dm3.ReadDm3File('ellipse2.dm3')
-# fft1 = dm3.ReadDm3File('fft1_mask.dm3')
-fitted_ellipses = []
-ellipse_to_track = []
+    fft1 = dm3.ReadDm3File('ellipse2.dm3')
+    # fft1 = dm3.ReadDm3File('fft1.dm3')
+    fitted_ellipses = []
+    ellipse_to_track = []
 
-for iteration in range(n_iterations):
-    print('--------------------------')
-    print('Iteration no {0}...'.format(iteration + 1))
-    print('--------------------------')
+    a_range = [[0, fft1.shape[0] // 2]]
+    b_range = [[0, fft1.shape[0] // 2]]
 
-    tilt_angle_deg = random.randint(min_tilt, max_tilt)
-    tilt_angle_rad = deg2rad(tilt_angle_deg)
+    for iteration in range(const.n_iterations):
+        # print('--------------------------')
+        print('Iteration no {0}...'.format(iteration + 1))
+        # print('--------------------------')
 
-    a_axis = random.randint(0, fft1.shape[0] // 2)
-    b_axis = a_axis     # start from circle
-    # b_axis = random.randint(0, fft1.shape[1] // 2)
-    model_ellipse = Ellipse([0, 0], a_axis, b_axis, tilt_angle_rad)
-    if iteration == 0:
-        ellipse_to_track.append(model_ellipse)
+        tilt_angle_deg = random.randint(const.min_tilt, const.max_tilt)
+        tilt_angle_rad = deg2rad(tilt_angle_deg)
 
-    n_inliers_curr = count_inliers(fft1, model_ellipse)
-    print('New model:')
-    print('[a = {0}, b = {1}, tilt = {2:.0f}]'.format(model_ellipse.a, model_ellipse.b, rad2deg(model_ellipse.tau % (2 * np.pi))))
-    # print('N0 = {0}'.format(n_inliers_curr))
-
-    # correct model randomly
-    n_inliers_dev = n_inliers_curr
-    corr_dir = 1
-    last_opt = 0
-    opts = list(range(0, 5))
-    all_opts_used = False
-    n_tries = 0
-
-    while not all_opts_used or n_inliers_curr > try_again_threshold:
-
-        if all_opts_used:   # start again if n_inliers > try_again_threshold
-            opts = list(range(0, 5))
-            all_opts_used = False
-            n_tries += 1
-            if n_tries > max_n_tries:
+        a_sr_idx = random.randint(0, len(a_range)-1)
+        a_axis = random.randint(a_range[a_sr_idx][0], a_range[a_sr_idx][1])
+        b_axis = a_axis     # start from circle
+        b_is_a = False
+        for b_sr in b_range:
+            if b_sr[0] < b_axis < b_sr[1]:
+                b_is_a = True
                 break
+        if not b_is_a:
+            b_sr_idx = random.randint(0, len(b_range)-1)
+            b_axis = random.randint(b_range[b_sr_idx][0], b_range[b_sr_idx][1])
 
-        # If new model is worse than the previous one, get a new random correction.
-        # If new model is better than the previous one, keep changing the model in the same way
-        # (same type of correction, in the same direction).
-        if n_inliers_dev <= n_inliers_curr:
-            corr_dir = 1
-            model_ellipse_dev, last_opt = correct_model_randomly(model_ellipse, fft1.shape[0] // 2, corr_dir, n_inliers_curr, opts)
-            opts.remove(last_opt)
-        else:
-            model_ellipse_dev, last_opt = correct_model_randomly(model_ellipse, fft1.shape[0] // 2, corr_dir, n_inliers_dev, opts,
-                                                                 opt_fixed=True, opt=last_opt)
+        # b_axis = random.randint(0, fft1.shape[1] // 2)
+        model_ellipse = Ellipse([0, 0], a_axis, b_axis, tilt_angle_rad)
+        if iteration == 0:
+            ellipse_to_track.append(model_ellipse)
 
         n_inliers_curr = count_inliers(fft1, model_ellipse)
-        n_inliers_dev = count_inliers(fft1, model_ellipse_dev)
-        print('N1 = {0}, N0 = {1}'.format(n_inliers_dev, n_inliers_curr))
+        print('[a = {0}, b = {1}, tilt = {2:.0f}]'.format(model_ellipse.a, model_ellipse.b, rad2deg(model_ellipse.tau % (2 * np.pi))))
+        print('N0 = {0}'.format(n_inliers_curr))
 
-        # If new model is worse than the previous one (and the direction +1 was already used),
-        # change the direction (to -1) and try with the same type of correction.
-        if n_inliers_dev <= n_inliers_curr: # and corr_dir > 0:
-            corr_dir *= -1
-            model_ellipse_dev, last_opt = correct_model_randomly(model_ellipse, fft1.shape[0] // 2, corr_dir, n_inliers_curr, opts,
-                                                                 opt_fixed=True, opt=last_opt)
+        # correct model randomly
+        n_inliers_dev = n_inliers_curr
+        corr_dir = 1
+        last_opt = 0
+        opts = list(range(0, 5))
+        all_opts_used = False
+        n_tries = 0
 
+        while not all_opts_used or n_inliers_curr > const.try_again_threshold:
+
+            if all_opts_used:   # start again if n_inliers > try_again_threshold
+                opts = list(range(0, 5))
+                all_opts_used = False
+                n_tries += 1
+                if n_tries > const.max_n_tries:
+                    break
+
+            # If new model is worse than the previous one, get a new random correction.
+            # If new model is better than the previous one, keep changing the model in the same way
+            # (same type of correction, in the same direction).
+            if n_inliers_dev <= n_inliers_curr:
+                corr_dir = 1
+                model_ellipse_dev, last_opt = correct_model_randomly(model_ellipse, a_range, b_range, corr_dir, n_inliers_curr, opts)
+                opts.remove(last_opt)
+            else:
+                model_ellipse_dev, last_opt = correct_model_randomly(model_ellipse, a_range, b_range, corr_dir, n_inliers_dev, opts,
+                                                                     opt_fixed=True, opt=last_opt)
+
+            n_inliers_curr = count_inliers(fft1, model_ellipse)
             n_inliers_dev = count_inliers(fft1, model_ellipse_dev)
-            print('N1 = {0}, N0 = {1}'.format(n_inliers_dev, n_inliers_curr))
+            # print('N1 = {0}, N0 = {1}'.format(n_inliers_dev, n_inliers_curr))
 
-        # If one of applied corrections worked, accept the development model as the new current model.
-        if n_inliers_dev > n_inliers_curr:
-            # print('Correction accepted!')
-            model_ellipse = model_ellipse_dev.copy()
-            if iteration == 0:
-                ellipse_to_track.append(model_ellipse)
+            # If new model is worse than the previous one (and the direction +1 was already used),
+            # change the direction (to -1) and try with the same type of correction.
+            if n_inliers_dev <= n_inliers_curr:
+                corr_dir *= -1
+                model_ellipse_dev, last_opt = correct_model_randomly(model_ellipse, a_range, b_range, corr_dir, n_inliers_curr, opts,
+                                                                     opt_fixed=True, opt=last_opt)
 
-        # Check if all 3 types of corrections were tested against model.
-        if len(opts) == 0:
-            all_opts_used = True
+                n_inliers_dev = count_inliers(fft1, model_ellipse_dev)
+                print('N1 = {0}'.format(n_inliers_dev))
 
-        # If the current number of inliers is greater than some threshold value,
-        # cut the fitted ellipse (and its surrounding) from image, break from
-        # current while loop and go to the next iteration.
-        # TODO: If ellipse is fitted correctly then next a and b values should be generated from different range,
-        # TODO: i.e. there should be a ring of restricted values around a0 and b0 of fitted ellipse.
-        # TODO: This should allow for finding the smallest ellipse in 'ellipse2.dm3'.
-        if n_inliers_curr > n_inliers_threshold:
-            ab_ratio = model_ellipse.a / model_ellipse.b
-            if ab_ratio < min_ab_ratio or ab_ratio > (1.0 / min_ab_ratio):
+            # If one of applied corrections worked, accept the development model as the new current model.
+            if n_inliers_dev > n_inliers_curr:
+                # print('Correction accepted!')
+                model_ellipse = model_ellipse_dev.copy()
+                if iteration == 0:
+                    ellipse_to_track.append(model_ellipse)
+
+            # Check if all 3 types of corrections were tested against model.
+            if len(opts) == 0:
+                all_opts_used = True
+
+            # If the current number of inliers is greater than some threshold value,
+            # cut the fitted ellipse (and its surrounding) from image, break from
+            # current while loop and go to the next iteration.
+            # TODO: If ellipse is fitted correctly then next a and b values should be generated from different range,
+            # TODO: i.e. there should be a ring of restricted values around a0 and b0 of fitted ellipse.
+            # TODO: This should allow for finding the smallest ellipse in 'ellipse2.dm3'.
+            if n_inliers_curr > const.n_inliers_threshold:
+                ab_ratio = model_ellipse.a / model_ellipse.b
+                if ab_ratio < const.min_ab_ratio or ab_ratio > (1.0 / const.min_ab_ratio):
+                    break
+                display_ellipse_on_image(model_ellipse, fft1)
+                fft1 = cut_ellipse_from_image(model_ellipse, fft1, 20)
+                display_ellipse_on_image(model_ellipse, fft1)
+                fitted_ellipses.append(model_ellipse)
+                a_range, b_range = modify_range_of_axis_values(model_ellipse, a_range, b_range)
+                # try_again_threshold /= 1.6
+                # n_inliers_threshold /= 1.4
+                # min_dist_from_model *= 1.4
+                print(a_range)
+                print(b_range)
                 break
-            display_ellipse_on_image(model_ellipse, fft1)
-            fft1 = cut_ellipse_from_image(model_ellipse, fft1, 20)
-            display_ellipse_on_image(model_ellipse, fft1)
-            fitted_ellipses.append(model_ellipse)
+
+        if len(fitted_ellipses) >= const.n_models_to_find:
             break
 
-    if len(fitted_ellipses) >= 4:
-        break
+    for e, idx in zip(fitted_ellipses, range(len(fitted_ellipses))):
+        print('\n-------------\nRing no {0}\n-------------'.format(idx+1))
+        print('a = {0:.2f} 1/nm\nb = {1:.2f} 1/nm\ntilt = {2:.0f} deg'.format(e.a * const.pxWidth,
+                                                                              e.b * const.pxWidth,
+                                                                              rad2deg(e.tau % (2 * np.pi))))
 
-for e, idx in zip(fitted_ellipses, range(len(fitted_ellipses))):
-    print('\n-------------\nRing no {0}\n-------------'.format(idx+1))
-    print('a = {0:.2f} 1/nm\nb = {1:.2f} 1/nm\ntilt = {2:.0f} deg'.format(e.a * const.pxWidth,
-                                                                          e.b * const.pxWidth,
-                                                                          rad2deg(e.tau % (2 * np.pi))))
+    for e in ellipse_to_track:
+        x, y = generate_ellipse_to_draw(e)
+        plt.plot(x, y, 'r')
 
-for e in ellipse_to_track:
-    x, y = generate_ellipse_to_draw(e)
-    plt.plot(x, y, 'r')
+    plt.show()
 
-plt.show()
+# ------------------------------------------------------------
 
-
-
+fit_model_to_image()

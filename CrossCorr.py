@@ -6,7 +6,6 @@ import Constants as const
 import CudaConfig as ccfg
 import ImageSupport as imsup
 import ArraySupport as arrsup
-import Propagation as prop
 
 #-------------------------------------------------------------------
 
