@@ -9,6 +9,7 @@
 import Constants as const
 import Dm3Reader3 as dm3
 import ImageSupport as imsup
+import RANSAC as ran
 
 import numpy as np
 from PyQt4 import QtCore, QtGui
@@ -32,8 +33,10 @@ except AttributeError:
 # -------------------------------------------------------------------
 
 class Ui_MainWindow(QtGui.QMainWindow):
-    def __init__(self):
+    def __init__(self, app=None):
         super(Ui_MainWindow, self).__init__()
+        self.ellipses = []
+        self.app = app
         self.setupUi()
 
     def setupUi(self):
@@ -42,17 +45,14 @@ class Ui_MainWindow(QtGui.QMainWindow):
         self.centralwidget = QtGui.QWidget(self)
         self.centralwidget.setObjectName(_fromUtf8("centralwidget"))
 
-        self.img_view = QtGui.QLabel(self.centralwidget)
-        # self.img_view = QtGui.QGraphicsView(self.centralwidget)
-        self.img_view.setGeometry(QtCore.QRect(20, 10, 512, 512))
+        img_path = QtGui.QFileDialog.getOpenFileName()
+        img = dm3.ReadDm3File(img_path)
+        self.img_view = GraphicsLabel(self, img)
+        self.img_view.setGeometry(QtCore.QRect(20, 10, const.ccWidgetDim, const.ccWidgetDim))
         self.img_view.setObjectName(_fromUtf8("img_view"))
 
-        imagePath = QtGui.QFileDialog.getOpenFileName()
-        self.image = dm3.ReadDm3File(imagePath)
-        self.createPixmap()
-
         self.verticalLayoutWidget = QtGui.QWidget(self.centralwidget)
-        self.verticalLayoutWidget.setGeometry(QtCore.QRect(560, 20, 160, 281))
+        self.verticalLayoutWidget.setGeometry(QtCore.QRect(560, 20, 160, 310))
         self.verticalLayoutWidget.setObjectName(_fromUtf8("verticalLayoutWidget"))
         self.verticalLayout = QtGui.QVBoxLayout(self.verticalLayoutWidget)
         self.verticalLayout.setObjectName(_fromUtf8("verticalLayout"))
@@ -77,6 +77,19 @@ class Ui_MainWindow(QtGui.QMainWindow):
         self.n_inl_threshold_edit.setProperty("value", 7000)
         self.n_inl_threshold_edit.setObjectName(_fromUtf8("n_inl_threshold_edit"))
         self.verticalLayout.addWidget(self.n_inl_threshold_edit)
+
+        self.n_ell_to_find_label = QtGui.QLabel(self.verticalLayoutWidget)
+        self.n_ell_to_find_label.setObjectName(_fromUtf8("n_ell_to_find_label"))
+        self.verticalLayout.addWidget(self.n_ell_to_find_label)
+
+        self.n_ell_to_find_edit = QtGui.QSpinBox(self.verticalLayoutWidget)
+        self.n_ell_to_find_edit.setMinimum(0)       # if val == 0 then finish after n_iterations
+        self.n_ell_to_find_edit.setMaximum(10)
+        self.n_ell_to_find_edit.setSingleStep(1)
+        self.n_ell_to_find_edit.setProperty("value", 3)
+        self.n_ell_to_find_edit.setObjectName(_fromUtf8("n_ell_to_find_edit"))
+        self.verticalLayout.addWidget(self.n_ell_to_find_edit)
+
         self.try_again_threshold_label = QtGui.QLabel(self.verticalLayoutWidget)
         self.try_again_threshold_label.setObjectName(_fromUtf8("try_again_threshold_label"))
         self.verticalLayout.addWidget(self.try_again_threshold_label)
@@ -99,12 +112,12 @@ class Ui_MainWindow(QtGui.QMainWindow):
         self.max_n_tries_label = QtGui.QLabel(self.verticalLayoutWidget)
         self.max_n_tries_label.setObjectName(_fromUtf8("max_n_tries_label"))
         self.verticalLayout.addWidget(self.max_n_tries_label)
-        self.n_tries_edit = QtGui.QSpinBox(self.verticalLayoutWidget)
-        self.n_tries_edit.setMinimum(1)
-        self.n_tries_edit.setMaximum(100)
-        self.n_tries_edit.setProperty("value", 20)
-        self.n_tries_edit.setObjectName(_fromUtf8("n_tries_edit"))
-        self.verticalLayout.addWidget(self.n_tries_edit)
+        self.max_n_tries_edit = QtGui.QSpinBox(self.verticalLayoutWidget)
+        self.max_n_tries_edit.setMinimum(1)
+        self.max_n_tries_edit.setMaximum(100)
+        self.max_n_tries_edit.setProperty("value", 20)
+        self.max_n_tries_edit.setObjectName(_fromUtf8("max_n_tries_edit"))
+        self.verticalLayout.addWidget(self.max_n_tries_edit)
         self.min_ab_ratio_label = QtGui.QLabel(self.verticalLayoutWidget)
         self.min_ab_ratio_label.setObjectName(_fromUtf8("min_ab_ratio_label"))
         self.verticalLayout.addWidget(self.min_ab_ratio_label)
@@ -141,14 +154,20 @@ class Ui_MainWindow(QtGui.QMainWindow):
         self.statusbar.setObjectName(_fromUtf8("statusbar"))
         self.setStatusBar(self.statusbar)
 
+        self.find_model_button.clicked.connect(self.run_ransac)
+        # self.export_button.clicked.connect(self.export_image)
+        # self.crop_button.clicked.connect(self.crop_image)
+
+        self.statusbar.showMessage('Ready')
         self.retranslateUi(self)
         QtCore.QMetaObject.connectSlotsByName(self)
         self.show()
 
     def retranslateUi(self, MainWindow):
         MainWindow.setWindowTitle(_translate("MainWindow", "RANSAC Ellipse Fitting", None))
-        self.n_iter_label.setText(_translate("MainWindow", "No of iterations", None))
+        self.n_iter_label.setText(_translate("MainWindow", "Num. of iterations", None))
         self.n_inl_threshold_label.setText(_translate("MainWindow", "Num. of inliers (threshold)", None))
+        self.n_ell_to_find_label.setText(_translate("MainWindow", "Num. of ellipses to find", None))
         self.try_again_threshold_label.setText(_translate("MainWindow", "Try-again threshold", None))
         self.min_dist_label.setText(_translate("MainWindow", "Min. dist. from model [px]", None))
         self.max_n_tries_label.setText(_translate("MainWindow", "Max. num. of tries", None))
@@ -157,22 +176,72 @@ class Ui_MainWindow(QtGui.QMainWindow):
         self.export_button.setText(_translate("MainWindow", "Export", None))
         self.crop_button.setText(_translate("MainWindow", "Crop", None))
 
-    def createPixmap(self):
-        # paddedImage = imsup.PadImageBufferToNx512(self.image, np.max(self.image.buffer))
-        # qImg = QtGui.QImage(imsup.ScaleImage(paddedImage.buffer, 0.0, 255.0).astype(np.uint8),
-        #                     paddedImage.width, paddedImage.height, QtGui.QImage.Format_Indexed8)
-        qImg = QtGui.QImage(imsup.ScaleImage(self.image, 0.0, 255.0).astype(np.uint8),
-                            self.image.shape[1], self.image.shape[0], QtGui.QImage.Format_Indexed8)
-        pixmap = QtGui.QPixmap(qImg)
-        pixmap = pixmap.scaledToWidth(const.ccWidgetDim)  # !!!
-        self.img_view.setPixmap(pixmap)
+    def run_ransac(self):
+        self.statusbar.showMessage('Found ellipses: 0')
+        self.ellipses = []
+        self.ellipses = ran.fit_model_to_image(self.img_view.image,
+                                               self.n_iter_edit.value(),
+                                               self.n_inl_threshold_edit.value(),
+                                               self.n_ell_to_find_edit.value(),
+                                               self.try_again_threshold_edit.value(),
+                                               self.min_dist_edit.value(),
+                                               self.max_n_tries_edit.value(),
+                                               self.min_ab_ratio_edit.value(),
+                                               self)
+        self.img_view.update()
+
+# -------------------------------------------------------------------
+
+class GraphicsLabel(QtGui.QLabel):
+    def __init__(self, parent, image=None):
+        super(GraphicsLabel, self).__init__(parent)
+
+        self.image = image
+        q_image = QtGui.QImage(imsup.ScaleImage(self.image, 0.0, 255.0).astype(np.uint8),
+                               self.image.shape[1], self.image.shape[0], QtGui.QImage.Format_Indexed8)
+        pixmap = QtGui.QPixmap(q_image)
+        pixmap = pixmap.scaledToWidth(const.ccWidgetDim)
+
+        self.view = QtGui.QGraphicsView(self)
+        self.scene = QtGui.QGraphicsScene()
+        self.view.setScene(self.scene)
+
+        self.scene.addPixmap(pixmap)
+        self.view.show()
+        self.update()
+
+    def update(self):
+        super(GraphicsLabel, self).update()
+
+        mid_x = const.ccWidgetDim // 2
+        mid_y = const.ccWidgetDim // 2
+
+        line_pen = QtGui.QPen(QtCore.Qt.yellow)
+        line_pen.setCapStyle(QtCore.Qt.RoundCap)
+        line_pen.setWidth(2)
+
+        coeff = const.ccWidgetDim / self.image.shape[0]
+        print('coeff = {0}'.format(coeff))
+
+        for item in self.scene.items()[:-1]:
+            self.scene.removeItem(item)
+
+        for e in self.parent().ellipses:
+            aa = e.a * coeff
+            bb = e.b * coeff
+            b = min(aa, bb)
+            a = max(aa, bb)
+            e_item = QtGui.QGraphicsEllipseItem(mid_x - a, mid_y - b, 2 * a, 2 * b)
+            e_item.setTransformOriginPoint(mid_x, mid_y)
+            print(e.tau, ran.rad2deg(e.tau))
+            e_item.setRotation(ran.rad2deg(e.tau))
+            e_item.setPen(line_pen)
+            self.scene.addItem(e_item)
 
 # -------------------------------------------------------------------
 
 def run_ransac_window():
     import sys
     app = QtGui.QApplication(sys.argv)
-    ransac_win = Ui_MainWindow()
+    ransac_win = Ui_MainWindow(app)
     sys.exit(app.exec_())
-
-run_ransac_window()
